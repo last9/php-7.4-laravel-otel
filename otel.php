@@ -3,6 +3,30 @@
 // Manual OpenTelemetry instrumentation bootstrap for Laravel
 // This file initializes basic OpenTelemetry configuration and utilities
 
+// Load environment variables manually since Laravel hasn't loaded them yet
+if (file_exists(__DIR__ . '/../.env')) {
+    $lines = file(__DIR__ . '/../.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos($line, '=') !== false && strpos($line, '#') !== 0) {
+            list($key, $value) = explode('=', $line, 2);
+            $key = trim($key);
+            $value = trim($value);
+            
+            // Remove quotes if present
+            if (preg_match('/^"(.*)"$/', $value, $matches)) {
+                $value = $matches[1];
+            } elseif (preg_match("/^'(.*)'$/", $value, $matches)) {
+                $value = $matches[1];
+            }
+            
+            // Only set if not already set in environment
+            if (!isset($_ENV[$key])) {
+                $_ENV[$key] = $value;
+            }
+        }
+    }
+}
+
 class Last9Tracer
 {
     private static $instance = null;
@@ -11,11 +35,13 @@ class Last9Tracer
     
     private function __construct()
     {
-        $this->collectorUrl = $_ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ?? 'http://otel-collector:4318/v1/traces';
+        // Use $_ENV directly since Laravel functions are not available during bootstrap
+        $this->collectorUrl = $_ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ?? 'http://localhost:4318/v1/traces';
         $this->headers = ['Content-Type' => 'application/json'];
         // Parse OTEL_EXPORTER_OTLP_HEADERS if set
-        if (!empty($_ENV['OTEL_EXPORTER_OTLP_HEADERS'])) {
-            $headerPairs = explode(',', $_ENV['OTEL_EXPORTER_OTLP_HEADERS']);
+        $headers = $_ENV['OTEL_EXPORTER_OTLP_HEADERS'] ?? '';
+        if (!empty($headers)) {
+            $headerPairs = explode(',', $headers);
             foreach ($headerPairs as $pair) {
                 $kv = explode('=', $pair, 2);
                 if (count($kv) === 2) {
@@ -25,6 +51,8 @@ class Last9Tracer
                 }
             }
         }
+        
+
     }
     
     public static function getInstance()
@@ -60,8 +88,8 @@ class Last9Tracer
             'spanId' => $span['spanId'],
             'name' => $span['name'],
             'kind' => $span['kind'],
-            'startTimeUnixNano' => (int)($span['startTime'] * 1_000_000_000),
-            'endTimeUnixNano' => (int)($span['endTime'] * 1_000_000_000),
+            'startTimeUnixNano' => (int)($span['startTime'] * 1000000000),
+            'endTimeUnixNano' => (int)($span['endTime'] * 1000000000),
             'attributes' => $span['attributes'],
             'status' => $span['status']
         ];
@@ -108,116 +136,6 @@ class Last9Tracer
         }
         return $span;
     }
-    
-    private function exportTraceData($traceData)
-    {
-        try {
-            $client = new \GuzzleHttp\Client([
-                'timeout' => 2.0,
-                'verify' => false
-            ]);
-            $client->post($this->collectorUrl, [
-                'json' => $traceData,
-                'headers' => $this->headers
-            ]);
-        } catch (Exception $e) {
-            // Silently fail - tracing should not break the application
-        }
-    }
-
-    // New: Async export using Guzzle's postAsync
-    private function sendSpanManualTracerTestAsync($span)
-    {
-        // Build span array with parentSpanId set directly
-        $spanArr = [
-            'traceId' => $span['traceId'],
-            'spanId' => $span['spanId'],
-            'name' => $span['name'],
-            'kind' => $span['kind'],
-            'startTimeUnixNano' => (int)($span['startTime'] * 1_000_000_000),
-            'endTimeUnixNano' => (int)($span['endTime'] * 1_000_000_000),
-            'attributes' => $span['attributes'],
-            'status' => $span['status']
-        ];
-        if (isset($span['parentSpanId'])) {
-            $spanArr['parentSpanId'] = $span['parentSpanId'];
-        }
-        $traceData = [
-            'resourceSpans' => [
-                [
-                    'resource' => [
-                        'attributes' => [
-                            ['key' => 'service.name', 'value' => ['stringValue' => $_ENV['OTEL_SERVICE_NAME'] ?? 'laravel-app']],
-                            ['key' => 'service.version', 'value' => ['stringValue' => $_ENV['OTEL_SERVICE_VERSION'] ?? '1.0.0']],
-                            ['key' => 'service.instance.id', 'value' => ['stringValue' => gethostname() . '-' . getmypid()]],
-                            ['key' => 'deployment.environment', 'value' => ['stringValue' => $_ENV['APP_ENV'] ?? 'production']],
-                            ['key' => 'process.runtime.name', 'value' => ['stringValue' => 'php']],
-                            ['key' => 'process.runtime.version', 'value' => ['stringValue' => PHP_VERSION]],
-                            ['key' => 'process.pid', 'value' => ['intValue' => getmypid()]],
-                            ['key' => 'telemetry.sdk.name', 'value' => ['stringValue' => 'opentelemetry-php-manual']],
-                            ['key' => 'telemetry.sdk.version', 'value' => ['stringValue' => '1.0.0']],
-                            ['key' => 'telemetry.sdk.language', 'value' => ['stringValue' => 'php']],
-                        ]
-                    ],
-                    'scopeSpans' => [
-                        [
-                            'scope' => ['name' => 'laravel-manual-tracer', 'version' => '1.0.0'],
-                            'spans' => [ $spanArr ]
-                        ]
-                    ]
-                ]
-            ]
-        ];
-        try {
-            $url = $_ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ?? 'http://otel-collector:4318/v1/traces';
-            $headers = ['Content-Type' => 'application/json'];
-            if (!empty($_ENV['OTEL_EXPORTER_OTLP_HEADERS'])) {
-                $headerPairs = explode(',', $_ENV['OTEL_EXPORTER_OTLP_HEADERS']);
-                foreach ($headerPairs as $pair) {
-                    $kv = explode('=', $pair, 2);
-                    if (count($kv) === 2) {
-                        $key = urldecode(trim($kv[0]));
-                        $value = urldecode(trim($kv[1]));
-                        $headers[$key] = $value;
-                    }
-                }
-            }
-            $client = new \GuzzleHttp\Client([
-                'timeout' => 2.0,
-                'verify' => false
-            ]);
-            // Use postAsync for non-blocking export
-            $promise = $client->postAsync($url, [
-                'json' => $traceData,
-                'headers' => $headers
-            ]);
-            $promise->then(
-                function ($response) {
-                },
-                function ($e) {
-                }
-            );
-        } catch (Exception $e) {
-        }
-    }
-    
-    private function sendAsync($data)
-    {
-        try {
-            // Use Guzzle HTTP client like the working middleware
-            $client = new \GuzzleHttp\Client([
-                'timeout' => 2.0,
-                'verify' => false
-            ]);
-            
-            $client->post($this->collectorUrl, [
-                'json' => $data,
-                'headers' => $this->headers
-            ]);
-        } catch (Exception $e) {
-            // Silently fail - tracing should not break the application
-        }
-    }
 }
 
 // Initialize global tracer
@@ -236,26 +154,33 @@ class SimpleTracer {
         $this->tracer->finishSpan($span);
     }
     
-    public function traceDatabase($query, $dbName = null, $connectionName = null, $duration = null, $rowCount = null, $error = null) {
+    public function traceDatabase($query, $dbName = null, $connectionName = null, $duration = null, $rowCount = null, $error = null, $customSpanName = null) {
         $operation = $this->extractDbOperation($query);
         $tableName = $this->extractTableName($query, $operation);
-        $spanName = 'db.' . $operation . ($tableName ? " {$tableName}" : '');
+        
+        // Use custom span name if provided (for Eloquent events), otherwise use default
+        if ($customSpanName) {
+            $spanName = $customSpanName;
+        } else {
+            $spanName = 'db.' . $operation . ($tableName ? " {$tableName}" : '');
+        }
+        
         $traceId = isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16));
         $parentSpanId = isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null;
         $spanId = bin2hex(random_bytes(8));
         $startTime = microtime(true);
         $endTime = $startTime + ($duration ? $duration / 1000 : 0.001);
-        $attributes = [
-            ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
-            ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
-            ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
-            ['key' => 'db.name', 'value' => ['stringValue' => $dbName ?? $_ENV['DB_DATABASE'] ?? 'laravel']],
-            ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
-            ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
-            ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
-            ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
-            ['key' => 'db.user', 'value' => ['stringValue' => $_ENV['DB_USERNAME'] ?? 'root']],
-        ];
+                    $attributes = [
+                ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
+                ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
+                ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
+                ['key' => 'db.name', 'value' => ['stringValue' => $dbName ?? $_ENV['DB_DATABASE'] ?? 'laravel']],
+                ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
+                ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
+                ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
+                ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
+                // Removed db.user to prevent credential leakage
+            ];
         if ($tableName) {
             $attributes[] = ['key' => 'db.sql.table', 'value' => ['stringValue' => $tableName]];
         }
@@ -281,71 +206,6 @@ class SimpleTracer {
             'startTime' => $startTime,
             'endTime' => $endTime,
             'attributes' => $attributes,
-            'status' => [
-                'code' => $error ? 2 : 1,
-                'message' => $error ? (is_object($error) ? $error->getMessage() : (string)$error) : null
-            ]
-        ];
-        if ($parentSpanId) {
-            $span['parentSpanId'] = $parentSpanId;
-        }
-        $this->tracer->finishSpan($span, $span['status']['code'], $span['status']['message']);
-    }
-    
-    public function traceHttpClient($method, $url, $options = [], $response = null, $error = null, $traceId = null, $parentSpanId = null, $spanId = null) {
-        $parsedUrl = parse_url($url);
-        $attributes = [
-            'http.request.method' => $method,
-            'url.full' => $url,
-            'server.address' => $parsedUrl['host'] ?? '',
-            'server.port' => $parsedUrl['port'] ?? ($parsedUrl['scheme'] === 'https' ? 443 : 80),
-            'url.scheme' => $parsedUrl['scheme'] ?? 'http',
-            'url.path' => $parsedUrl['path'] ?? '/',
-            'network.protocol.name' => 'http',
-            'network.protocol.version' => '1.1'
-        ];
-        if (isset($parsedUrl['query'])) {
-            $attributes['url.query'] = $parsedUrl['query'];
-        }
-        if (isset($options['body']) && is_string($options['body'])) {
-            $attributes['http.request.body.size'] = strlen($options['body']);
-        }
-        if (isset($options['headers']['User-Agent'])) {
-            $attributes['user_agent.original'] = $options['headers']['User-Agent'];
-        }
-        if ($response && is_array($response)) {
-            if (isset($response['status_code'])) {
-                $attributes['http.response.status_code'] = $response['status_code'];
-            }
-            if (isset($response['body_size'])) {
-                $attributes['http.response.body.size'] = $response['body_size'];
-            }
-            if (isset($response['headers']['Content-Type'])) {
-                $attributes['http.response.header.content-type'] = $response['headers']['Content-Type'];
-            }
-        }
-        // OpenTelemetry error semantic conventions
-        if ($error) {
-            $attributes['exception.type'] = is_object($error) ? get_class($error) : 'http_error';
-            $attributes['exception.message'] = is_object($error) ? $error->getMessage() : (string)$error;
-            if (is_object($error) && method_exists($error, 'getTraceAsString')) {
-                $attributes['exception.stacktrace'] = $error->getTraceAsString();
-            }
-        }
-        $spanName = $method . ' ' . ($parsedUrl['host'] ?? 'unknown');
-        $traceId = $traceId ?: (isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16)));
-        $parentSpanId = $parentSpanId ?: (isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null);
-        $spanId = $spanId ?: bin2hex(random_bytes(8));
-        $startTime = microtime(true);
-        $endTime = $startTime + 0.001;
-        $span = [
-            'traceId' => $traceId,
-            'spanId' => $spanId,
-            'name' => $spanName,
-            'kind' => 3, // CLIENT
-            'startTime' => $startTime,
-            'endTime' => $endTime,
-            'attributes' => $this->formatAttributes($attributes),
             'status' => [
                 'code' => $error ? 2 : 1,
                 'message' => $error ? (is_object($error) ? $error->getMessage() : (string)$error) : null
@@ -434,267 +294,615 @@ if (!function_exists('tracer')) {
     }
 }
 
-// Helper function for tracing HTTP client calls with curl
+// Helper function to sanitize URLs and remove sensitive data
+if (!function_exists('sanitize_url_for_tracing')) {
+    function sanitize_url_for_tracing($url) {
+        $parsedUrl = parse_url($url);
+        if (!$parsedUrl) {
+            return $url;
+        }
+        
+        // Remove sensitive query parameters
+        if (isset($parsedUrl['query'])) {
+            $queryParams = [];
+            parse_str($parsedUrl['query'], $queryParams);
+            
+            // List of sensitive parameter names to redact
+            $sensitiveParams = [
+                'password', 'passwd', 'pwd', 'secret', 'key', 'token', 'auth', 
+                'api_key', 'api_secret', 'access_token', 'refresh_token',
+                'session', 'sessionid', 'sid', 'csrf', 'xsrf',
+                'authorization', 'bearer', 'apikey', 'apisecret'
+            ];
+            
+            foreach ($sensitiveParams as $param) {
+                if (isset($queryParams[$param])) {
+                    $queryParams[$param] = '[REDACTED]';
+                }
+            }
+            
+            $parsedUrl['query'] = http_build_query($queryParams);
+        }
+        
+        // Rebuild URL without sensitive data
+        $scheme = isset($parsedUrl['scheme']) ? $parsedUrl['scheme'] . '://' : '';
+        $host = $parsedUrl['host'] ?? '';
+        $port = isset($parsedUrl['port']) ? ':' . $parsedUrl['port'] : '';
+        $path = $parsedUrl['path'] ?? '';
+        $query = isset($parsedUrl['query']) ? '?' . $parsedUrl['query'] : '';
+        $fragment = isset($parsedUrl['fragment']) ? '#' . $parsedUrl['fragment'] : '';
+        
+        return $scheme . $host . $port . $path . $query . $fragment;
+    }
+}
+
+// Helper function for traced Guzzle HTTP requests
+if (!function_exists('traced_guzzle_request')) {
+    function traced_guzzle_request($client, $method, $url, $options = []) {
+        $traceId = isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16));
+        $parentSpanId = isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null;
+        $spanId = bin2hex(random_bytes(8));
+        $startTime = microtime(true);
+        
+
+        
+        try {
+            // Add trace headers to the request
+            $options['headers'] = array_merge($options['headers'] ?? [], [
+                'X-Trace-Id' => $traceId,
+                'X-Span-Id' => $spanId
+            ]);
+            
+            $response = $client->request($method, $url, $options);
+            $endTime = microtime(true);
+            
+            // Extract URL components for attributes (sanitized)
+            $parsedUrl = parse_url($url);
+            $scheme = $parsedUrl['scheme'] ?? 'http';
+            $host = $parsedUrl['host'] ?? '';
+            $port = $parsedUrl['port'] ?? ($scheme === 'https' ? 443 : 80);
+            $path = $parsedUrl['path'] ?? '/';
+            
+            // Sanitize URL for tracing
+            $sanitizedUrl = sanitize_url_for_tracing($url);
+            $sanitizedQuery = parse_url($sanitizedUrl, PHP_URL_QUERY);
+            $query = $sanitizedQuery ? '?' . $sanitizedQuery : '';
+            
+            $attributes = [
+                ['key' => 'http.request.method', 'value' => ['stringValue' => strtoupper($method)]],
+                ['key' => 'url.scheme', 'value' => ['stringValue' => $scheme]],
+                ['key' => 'url.path', 'value' => ['stringValue' => $path]],
+                ['key' => 'url.query', 'value' => ['stringValue' => $query]],
+                ['key' => 'url.full', 'value' => ['stringValue' => $sanitizedUrl]],
+                ['key' => 'server.address', 'value' => ['stringValue' => $host]],
+                ['key' => 'server.port', 'value' => ['intValue' => $port]],
+                ['key' => 'http.response.status_code', 'value' => ['intValue' => $response->getStatusCode()]],
+                ['key' => 'network.protocol.name', 'value' => ['stringValue' => 'http']],
+                ['key' => 'network.protocol.version', 'value' => ['stringValue' => '1.1']],
+            ];
+            
+            // Add request body size if available
+            if (isset($options['json'])) {
+                $attributes[] = ['key' => 'http.request.body.size', 'value' => ['intValue' => strlen(json_encode($options['json']))]];
+            } elseif (isset($options['form_params'])) {
+                $attributes[] = ['key' => 'http.request.body.size', 'value' => ['intValue' => strlen(http_build_query($options['form_params']))]];
+            }
+            
+            // Add response body size if available
+            $responseBody = $response->getBody()->getContents();
+            if ($responseBody) {
+                $attributes[] = ['key' => 'http.response.body.size', 'value' => ['intValue' => strlen($responseBody)]];
+                // Reset the body stream position for future reads
+                $response->getBody()->rewind();
+            }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'HTTP ' . strtoupper($method),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => $response->getStatusCode() >= 400 ? 2 : 1,
+                    'message' => $response->getStatusCode() >= 400 ? 'HTTP ' . $response->getStatusCode() : null
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            return $response;
+            
+        } catch (Exception $e) {
+            $endTime = microtime(true);
+            
+            // Extract URL components for attributes (sanitized)
+            $parsedUrl = parse_url($url);
+            $scheme = $parsedUrl['scheme'] ?? 'http';
+            $host = $parsedUrl['host'] ?? '';
+            $port = $parsedUrl['port'] ?? ($scheme === 'https' ? 443 : 80);
+            $path = $parsedUrl['path'] ?? '/';
+            
+            // Sanitize URL for tracing
+            $sanitizedUrl = sanitize_url_for_tracing($url);
+            $sanitizedQuery = parse_url($sanitizedUrl, PHP_URL_QUERY);
+            $query = $sanitizedQuery ? '?' . $sanitizedQuery : '';
+            
+            $attributes = [
+                ['key' => 'http.request.method', 'value' => ['stringValue' => strtoupper($method)]],
+                ['key' => 'url.scheme', 'value' => ['stringValue' => $scheme]],
+                ['key' => 'url.path', 'value' => ['stringValue' => $path]],
+                ['key' => 'url.query', 'value' => ['stringValue' => $query]],
+                ['key' => 'url.full', 'value' => ['stringValue' => $sanitizedUrl]],
+                ['key' => 'server.address', 'value' => ['stringValue' => $host]],
+                ['key' => 'server.port', 'value' => ['intValue' => $port]],
+                ['key' => 'network.protocol.name', 'value' => ['stringValue' => 'http']],
+                ['key' => 'network.protocol.version', 'value' => ['stringValue' => '1.1']],
+                ['key' => 'exception.type', 'value' => ['stringValue' => get_class($e)]],
+                ['key' => 'exception.message', 'value' => ['stringValue' => $e->getMessage()]],
+            ];
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'HTTP ' . strtoupper($method),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 2, // ERROR
+                    'message' => $e->getMessage()
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            throw $e;
+        }
+    }
+}
+
+// Helper function for traced cURL requests
 if (!function_exists('traced_curl_exec')) {
     function traced_curl_exec($ch) {
         $traceId = isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16));
         $parentSpanId = isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null;
         $spanId = bin2hex(random_bytes(8));
-        $traceparent = '00-' . $traceId . '-' . $spanId . '-01';
-        curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge([
-            'traceparent: ' . $traceparent
-        ], curl_getinfo($ch, CURLINFO_HEADER_OUT) ? [] : []));
-        $url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) ?: curl_getinfo($ch, CURLINFO_URL);
-        if (!$url) {
-            $url = curl_getinfo($ch, CURLINFO_URL);
-        }
-        $method = 'GET'; // Default, could be POST etc. (not always available from curl handle)
-        $error = null;
-        $result = false;
-        $response = null;
+        $startTime = microtime(true);
+        
+
+        
         try {
-            $result = curl_exec($ch);
-        } catch (Exception $e) {
-            $error = $e;
-        }
-        // Get response info
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-        $downloadSize = curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD);
-        $errorMsg = curl_error($ch);
-        // Prepare response data
-        $response = [
-            'status_code' => $httpCode,
-            'body_size' => $downloadSize,
-            'headers' => [
-                'Content-Type' => $contentType
-            ]
-        ];
-        // Pass explicit IDs to traceHttpClient
-        $GLOBALS['simple_tracer']->traceHttpClient($method, $url, [], $response, $errorMsg ?: $error ?: null, $traceId, $parentSpanId, $spanId);
-        // --- New: Create a CLIENT span for the host ---
-        $parsedUrl = parse_url($url);
-        $host = $parsedUrl['host'] ?? null;
-        $port = $parsedUrl['port'] ?? (($parsedUrl['scheme'] ?? 'http') === 'https' ? 443 : 80);
-        if ($host) {
-            $hostSpanId = bin2hex(random_bytes(8));
-            $hostSpan = [
-                'traceId' => $traceId,
-                'spanId' => $hostSpanId,
-                'name' => 'CLIENT ' . $host,
-                'kind' => 3, // CLIENT
-                'startTime' => microtime(true),
-                'endTime' => microtime(true) + 0.0001, // very short
-                'attributes' => [
-                    ['key' => 'server.address', 'value' => ['stringValue' => $host]],
-                    ['key' => 'server.port', 'value' => ['intValue' => $port]]
-                ],
-                'status' => ['code' => 1]
+            // Get URL from cURL handle
+            $url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+            $method = 'GET'; // Default method
+            
+            // Try to determine HTTP method from cURL options
+            // Note: CURLINFO_CUSTOMREQUEST is not available in PHP 7.4, so we'll use a different approach
+            $method = 'GET'; // Default method
+            // We could try to infer from other cURL options, but for now we'll use GET as default
+            
+            // Add trace headers to the request
+            $currentHeaders = curl_getinfo($ch, CURLINFO_HEADER_OUT);
+            $traceHeaders = [
+                'X-Trace-Id: ' . $traceId,
+                'X-Span-Id: ' . $spanId
             ];
-            $hostSpan['parentSpanId'] = $spanId;
-            $GLOBALS['manual_tracer']->finishSpan($hostSpan, 1, null);
+            
+            // Execute the cURL request
+            $result = curl_exec($ch);
+            $endTime = microtime(true);
+            
+            // Get response information
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $totalTime = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+            $sizeDownload = curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD);
+            $sizeUpload = curl_getinfo($ch, CURLINFO_SIZE_UPLOAD);
+            
+            // Extract URL components for attributes (sanitized)
+            $parsedUrl = parse_url($url);
+            $scheme = $parsedUrl['scheme'] ?? 'http';
+            $host = $parsedUrl['host'] ?? '';
+            $port = $parsedUrl['port'] ?? ($scheme === 'https' ? 443 : 80);
+            $path = $parsedUrl['path'] ?? '/';
+            
+            // Sanitize URL for tracing
+            $sanitizedUrl = sanitize_url_for_tracing($url);
+            $sanitizedQuery = parse_url($sanitizedUrl, PHP_URL_QUERY);
+            $query = $sanitizedQuery ? '?' . $sanitizedQuery : '';
+            
+            $attributes = [
+                ['key' => 'http.request.method', 'value' => ['stringValue' => strtoupper($method)]],
+                ['key' => 'url.scheme', 'value' => ['stringValue' => $scheme]],
+                ['key' => 'url.path', 'value' => ['stringValue' => $path]],
+                ['key' => 'url.query', 'value' => ['stringValue' => $query]],
+                ['key' => 'url.full', 'value' => ['stringValue' => $sanitizedUrl]],
+                ['key' => 'server.address', 'value' => ['stringValue' => $host]],
+                ['key' => 'server.port', 'value' => ['intValue' => $port]],
+                ['key' => 'http.response.status_code', 'value' => ['intValue' => $httpCode]],
+                ['key' => 'network.protocol.name', 'value' => ['stringValue' => 'http']],
+                ['key' => 'network.protocol.version', 'value' => ['stringValue' => '1.1']],
+            ];
+            
+            // Add timing information
+            if ($totalTime > 0) {
+                $attributes[] = ['key' => 'http.request.duration', 'value' => ['stringValue' => (string)($totalTime * 1000)]];
+            }
+            
+            // Add size information
+            if ($sizeDownload > 0) {
+                $attributes[] = ['key' => 'http.response.body.size', 'value' => ['intValue' => $sizeDownload]];
+            }
+            if ($sizeUpload > 0) {
+                $attributes[] = ['key' => 'http.request.body.size', 'value' => ['intValue' => $sizeUpload]];
+            }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'HTTP ' . strtoupper($method),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => ($httpCode >= 400 || $result === false) ? 2 : 1,
+                    'message' => ($httpCode >= 400 || $result === false) ? 'HTTP ' . $httpCode : null
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            return $result;
+            
+        } catch (Exception $e) {
+            $endTime = microtime(true);
+            
+            // Extract URL components for attributes (sanitized)
+            $parsedUrl = parse_url($url ?? '');
+            $scheme = $parsedUrl['scheme'] ?? 'http';
+            $host = $parsedUrl['host'] ?? '';
+            $port = $parsedUrl['port'] ?? ($scheme === 'https' ? 443 : 80);
+            $path = $parsedUrl['path'] ?? '/';
+            
+            // Sanitize URL for tracing
+            $sanitizedUrl = sanitize_url_for_tracing($url ?? '');
+            $sanitizedQuery = parse_url($sanitizedUrl, PHP_URL_QUERY);
+            $query = $sanitizedQuery ? '?' . $sanitizedQuery : '';
+            
+            $attributes = [
+                ['key' => 'http.request.method', 'value' => ['stringValue' => strtoupper($method ?? 'GET')]],
+                ['key' => 'url.scheme', 'value' => ['stringValue' => $scheme]],
+                ['key' => 'url.path', 'value' => ['stringValue' => $path]],
+                ['key' => 'url.query', 'value' => ['stringValue' => $query]],
+                ['key' => 'url.full', 'value' => ['stringValue' => $sanitizedUrl]],
+                ['key' => 'server.address', 'value' => ['stringValue' => $host]],
+                ['key' => 'server.port', 'value' => ['intValue' => $port]],
+                ['key' => 'network.protocol.name', 'value' => ['stringValue' => 'http']],
+                ['key' => 'network.protocol.version', 'value' => ['stringValue' => '1.1']],
+                ['key' => 'exception.type', 'value' => ['stringValue' => get_class($e)]],
+                ['key' => 'exception.message', 'value' => ['stringValue' => $e->getMessage()]],
+            ];
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'HTTP ' . strtoupper($method ?? 'GET'),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 2, // ERROR
+                    'message' => $e->getMessage()
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            throw $e;
         }
-        return $result;
     }
 }
 
-// Helper function for tracing Guzzle calls
-if (!function_exists('traced_guzzle_request')) {
-    function traced_guzzle_request($client, $method, $uri, $options = []) {
+// Helper function for traced PDO queries
+if (!function_exists('traced_pdo_query')) {
+    function traced_pdo_query($pdo, $query) {
         $traceId = isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16));
         $parentSpanId = isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null;
         $spanId = bin2hex(random_bytes(8));
-        $traceparent = '00-' . $traceId . '-' . $spanId . '-01';
-        // Inject traceparent header
-        if (!isset($options['headers'])) {
-            $options['headers'] = [];
-        }
-        $options['headers']['traceparent'] = $traceparent;
-        $url = (string)$uri;
-        $error = null;
-        $response = null;
-        try {
-            $guzzleResponse = $client->request($method, $uri, $options);
-            // Extract response data
-            $response = [
-                'status_code' => $guzzleResponse->getStatusCode(),
-                'body_size' => $guzzleResponse->getBody()->getSize(),
-                'headers' => []
-            ];
-            // Add content type if available
-            if ($guzzleResponse->hasHeader('Content-Type')) {
-                $response['headers']['Content-Type'] = $guzzleResponse->getHeader('Content-Type')[0];
-            }
-        } catch (Exception $e) {
-            $error = $e;
-            if (method_exists($e, 'getResponse') && $e->getResponse()) {
-                $response = [
-                    'status_code' => $e->getResponse()->getStatusCode(),
-                    'body_size' => $e->getResponse()->getBody()->getSize()
-                ];
-            }
-        }
-        // Pass explicit IDs to traceHttpClient
-        $GLOBALS['simple_tracer']->traceHttpClient($method, $url, $options, $response, $error, $traceId, $parentSpanId, $spanId);
-        // --- New: Create a CLIENT span for the host ---
-        $parsedUrl = parse_url($url);
-        $host = $parsedUrl['host'] ?? null;
-        $port = $parsedUrl['port'] ?? (($parsedUrl['scheme'] ?? 'http') === 'https' ? 443 : 80);
-        if ($host) {
-            $hostSpanId = bin2hex(random_bytes(8));
-            $hostSpan = [
-                'traceId' => $traceId,
-                'spanId' => $hostSpanId,
-                'name' => 'CLIENT ' . $host,
-                'kind' => 3, // CLIENT
-                'startTime' => microtime(true),
-                'endTime' => microtime(true) + 0.0001, // very short
-                'attributes' => [
-                    ['key' => 'server.address', 'value' => ['stringValue' => $host]],
-                    ['key' => 'server.port', 'value' => ['intValue' => $port]]
-                ],
-                'status' => ['code' => 1]
-            ];
-            $hostSpan['parentSpanId'] = $spanId;
-            $GLOBALS['manual_tracer']->finishSpan($hostSpan, 1, null);
-        }
-        if ($error) {
-            throw $error;
-        }
-        return $guzzleResponse;
-    }
-}
-
-// Helper function for tracing PDO queries
-if (!function_exists('traced_pdo_query')) {
-    function traced_pdo_query($pdo, $query, $params = []) {
         $startTime = microtime(true);
-        $error = null;
-        $result = null;
-        $rowCount = null;
-        try {
-            if (!empty($params)) {
-                $stmt = $pdo->prepare($query);
-                $success = $stmt->execute($params);
-                $result = $stmt;
-                $rowCount = $stmt->rowCount();
-            } else {
-                $result = $pdo->query($query);
-                $rowCount = $result ? $result->rowCount() : 0;
-            }
-        } catch (Exception $e) {
-            $error = $e;
-        }
-        $endTime = microtime(true);
-        $duration = ($endTime - $startTime) * 1000; // Convert to milliseconds
-        // Extract database name from PDO connection
-        $dbName = null;
-        try {
-            $dbName = $pdo->query('SELECT DATABASE()')->fetchColumn();
-        } catch (Exception $e) {
-            // Ignore error, use default
-        }
-        // Always trace the database operation, even on error
-        $GLOBALS['simple_tracer']->traceDatabase($query, $dbName, null, $duration, $rowCount, $error);
-        if ($error) {
-            throw $error;
-        }
-        return $result;
-    }
-}
-
-// Helper function for tracing PDO prepared statements
-if (!function_exists('traced_pdo_prepare')) {
-    function traced_pdo_prepare($pdo, $query) {
-        return new TracedPDOStatement($pdo->prepare($query), $query);
-    }
-}
-
-// Traced PDO Statement wrapper class
-if (!class_exists('TracedPDOStatement')) {
-    class TracedPDOStatement {
-        private $stmt;
-        private $query;
         
-        public function __construct($stmt, $query) {
-            $this->stmt = $stmt;
-            $this->query = $query;
-        }
+
         
-        public function execute($params = []) {
-            $startTime = microtime(true);
-            $error = null;
-            $result = null;
-            
-            try {
-                $result = $this->stmt->execute($params);
-            } catch (Exception $e) {
-                $error = $e;
-            }
-            
+        try {
+            $result = $pdo->query($query);
             $endTime = microtime(true);
-            $duration = ($endTime - $startTime) * 1000; // Convert to milliseconds
-            $rowCount = $this->stmt->rowCount();
             
-            // Build query with parameters for tracing (simplified)
-            $tracedQuery = $this->query;
-            if (!empty($params)) {
-                $tracedQuery .= ' [PARAMS: ' . json_encode($params) . ']';
+            // Extract database operation and table name
+            $operation = extractDbOperation($query);
+            $tableName = extractTableName($query, $operation);
+            
+            $attributes = [
+                ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
+                ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
+                ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
+                ['key' => 'db.name', 'value' => ['stringValue' => $_ENV['DB_DATABASE'] ?? 'laravel']],
+                ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
+                ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
+                ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
+                ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
+                ['key' => 'db.user', 'value' => ['stringValue' => $_ENV['DB_USERNAME'] ?? 'root']],
+            ];
+            
+            if ($tableName) {
+                $attributes[] = ['key' => 'db.sql.table', 'value' => ['stringValue' => $tableName]];
             }
             
-            // Always trace the database operation, even on error
-            $GLOBALS['simple_tracer']->traceDatabase($tracedQuery, null, null, $duration, $rowCount, $error);
-            
-            if ($error) {
-                throw $error;
+            // Add row count if available
+            if ($result && method_exists($result, 'rowCount')) {
+                $rowCount = $result->rowCount();
+                if ($rowCount >= 0) {
+                    $attributes[] = ['key' => 'db.rows_affected', 'value' => ['intValue' => $rowCount]];
+                }
             }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'db.' . $operation . ($tableName ? " {$tableName}" : ''),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 1, // OK
+                    'message' => null
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
             
             return $result;
+            
+        } catch (Exception $e) {
+            $endTime = microtime(true);
+            
+            // Extract database operation and table name
+            $operation = extractDbOperation($query);
+            $tableName = extractTableName($query, $operation);
+            
+            $attributes = [
+                ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
+                ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
+                ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
+                ['key' => 'db.name', 'value' => ['stringValue' => $_ENV['DB_DATABASE'] ?? 'laravel']],
+                ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
+                ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
+                ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
+                ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
+                ['key' => 'db.user', 'value' => ['stringValue' => $_ENV['DB_USERNAME'] ?? 'root']],
+                ['key' => 'exception.type', 'value' => ['stringValue' => get_class($e)]],
+                ['key' => 'exception.message', 'value' => ['stringValue' => $e->getMessage()]],
+            ];
+            
+            if ($tableName) {
+                $attributes[] = ['key' => 'db.sql.table', 'value' => ['stringValue' => $tableName]];
+            }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'db.' . $operation . ($tableName ? " {$tableName}" : ''),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 2, // ERROR
+                    'message' => $e->getMessage()
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            throw $e;
+        }
+    }
+}
+
+// Helper function for traced PDO prepared statements
+if (!function_exists('traced_pdo_prepare')) {
+    function traced_pdo_prepare($pdo, $query) {
+        $traceId = isset($GLOBALS['otel_trace_id']) ? $GLOBALS['otel_trace_id'] : bin2hex(random_bytes(16));
+        $parentSpanId = isset($GLOBALS['otel_span_id']) ? $GLOBALS['otel_span_id'] : null;
+        $spanId = bin2hex(random_bytes(8));
+        $startTime = microtime(true);
+        
+
+        
+        try {
+            $stmt = $pdo->prepare($query);
+            $endTime = microtime(true);
+            
+            // Extract database operation and table name
+            $operation = extractDbOperation($query);
+            $tableName = extractTableName($query, $operation);
+            
+            $attributes = [
+                ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
+                ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
+                ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
+                ['key' => 'db.name', 'value' => ['stringValue' => $_ENV['DB_DATABASE'] ?? 'laravel']],
+                ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
+                ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
+                ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
+                ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
+                ['key' => 'db.user', 'value' => ['stringValue' => $_ENV['DB_USERNAME'] ?? 'root']],
+            ];
+            
+            if ($tableName) {
+                $attributes[] = ['key' => 'db.sql.table', 'value' => ['stringValue' => $tableName]];
+            }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'db.prepare.' . $operation . ($tableName ? " {$tableName}" : ''),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 1, // OK
+                    'message' => null
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            return $stmt;
+            
+        } catch (Exception $e) {
+            $endTime = microtime(true);
+            
+            // Extract database operation and table name
+            $operation = extractDbOperation($query);
+            $tableName = extractTableName($query, $operation);
+            
+            $attributes = [
+                ['key' => 'db.system', 'value' => ['stringValue' => 'mysql']],
+                ['key' => 'db.statement', 'value' => ['stringValue' => $query]],
+                ['key' => 'db.operation', 'value' => ['stringValue' => $operation]],
+                ['key' => 'db.name', 'value' => ['stringValue' => $_ENV['DB_DATABASE'] ?? 'laravel']],
+                ['key' => 'server.address', 'value' => ['stringValue' => $_ENV['DB_HOST'] ?? 'mysql']],
+                ['key' => 'server.port', 'value' => ['intValue' => (int)($_ENV['DB_PORT'] ?? 3306)]],
+                ['key' => 'network.transport', 'value' => ['stringValue' => 'tcp']],
+                ['key' => 'network.type', 'value' => ['stringValue' => 'ipv4']],
+                ['key' => 'db.user', 'value' => ['stringValue' => $_ENV['DB_USERNAME'] ?? 'root']],
+                ['key' => 'exception.type', 'value' => ['stringValue' => get_class($e)]],
+                ['key' => 'exception.message', 'value' => ['stringValue' => $e->getMessage()]],
+            ];
+            
+            if ($tableName) {
+                $attributes[] = ['key' => 'db.sql.table', 'value' => ['stringValue' => $tableName]];
+            }
+            
+            $span = [
+                'traceId' => $traceId,
+                'spanId' => $spanId,
+                'name' => 'db.prepare.' . $operation . ($tableName ? " {$tableName}" : ''),
+                'kind' => 3, // CLIENT
+                'startTime' => $startTime,
+                'endTime' => $endTime,
+                'attributes' => $attributes,
+                'status' => [
+                    'code' => 2, // ERROR
+                    'message' => $e->getMessage()
+                ]
+            ];
+            
+            if ($parentSpanId) {
+                $span['parentSpanId'] = $parentSpanId;
+            }
+            
+            $GLOBALS['manual_tracer']->finishSpan($span, $span['status']['code'], $span['status']['message']);
+            
+            throw $e;
+        }
+    }
+}
+
+// Helper functions for database operation extraction
+if (!function_exists('extractDbOperation')) {
+    function extractDbOperation($query) {
+        $query = trim(strtoupper($query));
+        if (preg_match('/^(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|REPLACE|SHOW|DESCRIBE|EXPLAIN)/', $query, $matches)) {
+            return strtolower($matches[1]);
+        }
+        return 'query';
+    }
+}
+
+if (!function_exists('extractTableName')) {
+    function extractTableName($query, $operation) {
+        $query = trim($query);
+        $tableName = null;
+        
+        switch (strtolower($operation)) {
+            case 'select':
+                if (preg_match('/\bFROM\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'insert':
+                if (preg_match('/\bINTO\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'update':
+                if (preg_match('/\bUPDATE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'delete':
+                if (preg_match('/\bFROM\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'create':
+                if (preg_match('/\bTABLE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'drop':
+                if (preg_match('/\bTABLE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'alter':
+                if (preg_match('/\bTABLE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
+            case 'truncate':
+                if (preg_match('/\bTRUNCATE\s+(?:TABLE\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query, $matches)) {
+                    $tableName = $matches[1];
+                }
+                break;
         }
         
-        public function fetch($fetch_style = PDO::FETCH_BOTH, $cursor_orientation = PDO::FETCH_ORI_NEXT, $cursor_offset = 0) {
-            return $this->stmt->fetch($fetch_style, $cursor_orientation, $cursor_offset);
-        }
-        
-        public function fetchAll($fetch_style = PDO::FETCH_BOTH, $fetch_argument = null, $ctor_args = []) {
-            return $this->stmt->fetchAll($fetch_style, $fetch_argument, $ctor_args);
-        }
-        
-        public function fetchColumn($column_number = 0) {
-            return $this->stmt->fetchColumn($column_number);
-        }
-        
-        public function rowCount() {
-            return $this->stmt->rowCount();
-        }
-        
-        public function bindParam($parameter, &$variable, $data_type = PDO::PARAM_STR, $length = null, $driver_options = null) {
-            return $this->stmt->bindParam($parameter, $variable, $data_type, $length, $driver_options);
-        }
-        
-        public function bindValue($parameter, $value, $data_type = PDO::PARAM_STR) {
-            return $this->stmt->bindValue($parameter, $value, $data_type);
-        }
-        
-        public function closeCursor() {
-            return $this->stmt->closeCursor();
-        }
-        
-        public function columnCount() {
-            return $this->stmt->columnCount();
-        }
-        
-        public function errorCode() {
-            return $this->stmt->errorCode();
-        }
-        
-        public function errorInfo() {
-            return $this->stmt->errorInfo();
-        }
-        
-        public function __call($method, $args) {
-            return call_user_func_array([$this->stmt, $method], $args);
-        }
+        return $tableName;
     }
 }
 
