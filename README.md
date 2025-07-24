@@ -14,8 +14,11 @@ cp AppServiceProvider.php /path/to/your/laravel/app/Providers/AppServiceProvider
 
 ### 2. Install Dependencies
 ```bash
-# Add Guzzle HTTP client to your project
-composer require guzzlehttp/guzzle:^6.3.1
+# Add OpenTelemetry packages and HTTP client dependencies to your project
+composer require \
+    open-telemetry/exporter-otlp:0.0.17 \
+    php-http/guzzle6-adapter:^2.0 \
+    nyholm/psr7:^1.8
 ```
 
 ### 3. Configure Environment
@@ -55,9 +58,9 @@ curl http://your-laravel-app.test/api/test
 
 | File | Destination | Purpose |
 |------|-------------|---------|
-| `otel.php` | `bootstrap/otel.php` | Core tracing logic and helpers |
-| `OpenTelemetryMiddleware.php` | `app/Http/Middleware/` | Request root span creation |
-| `AppServiceProvider.php` | `app/Providers/` | Database query tracing |
+| `otel.php` | `bootstrap/otel.php` | Core tracing logic with official OpenTelemetry SDK |
+| `OpenTelemetryMiddleware.php` | `app/Http/Middleware/` | Request root span creation with comprehensive attributes |
+| `AppServiceProvider.php` | `app/Providers/` | Automatic database query tracing with SQL parsing |
 
 ### Environment Configuration
 
@@ -96,14 +99,21 @@ require __DIR__.'/../vendor/autoload.php';
 ```
 
 #### 3. Database Tracing (Automatic)
-The `AppServiceProvider.php` file already includes automatic database query tracing. No additional code needed!
+The `AppServiceProvider.php` file includes automatic database query tracing with SQL parsing and operation detection. No additional code needed!
 
 ## Usage Examples
 
 ### Custom Tracing in Your Code
 
 ```php
-// Create a custom span
+// Create a custom span using the official SDK
+$GLOBALS['official_tracer']->spanBuilder('business.logic')
+    ->setAttribute('operation', 'user_registration')
+    ->setAttribute('user_id', $userId)
+    ->startSpan()
+    ->end();
+
+// Or use the simplified SimpleTracer wrapper
 $GLOBALS['simple_tracer']->createTrace('business.logic', [
     'operation' => 'user_registration',
     'user_id' => $userId
@@ -138,6 +148,14 @@ $result = traced_pdo_query($pdo, 'SELECT * FROM users');
 // Trace PDO prepared statements
 $stmt = traced_pdo_prepare($pdo, 'SELECT * FROM users WHERE id = ?');
 ```
+
+### Advanced Examples
+
+Check the `examples/` directory for comprehensive usage examples including:
+- Route-based tracing examples
+- Database operation tracing
+- PDO integration examples
+- Custom span creation patterns
 
 ## Verification Commands
 
@@ -177,11 +195,22 @@ curl -v http://your-app.test/api/test 2>&1 | grep -i trace
    - Check your endpoint URL and authentication token
    - Verify network connectivity to Last9
    - Check Laravel logs for errors
+   - Ensure the OpenTelemetry SDK is properly installed
 
 3. **Database queries not traced**
    - Ensure `AppServiceProvider.php` is properly copied
    - Check if database connection is working
    - Verify the `boot()` method contains the DB::listen code
+
+4. **Batch processing issues**
+   - Check if spans are being exported (may be delayed due to batch processing)
+   - Verify the batch processor configuration in `otel.php`
+
+5. **Package installation issues**
+   - Ensure all required packages are installed with correct versions
+   - Run `composer install` to install missing dependencies
+   - Check for version compatibility between packages
+   - Verify the specific version `0.0.17` of `open-telemetry/exporter-otlp` is installed
 
 ### Debug Mode
 
@@ -193,13 +222,43 @@ LOG_LEVEL=debug
 
 ## Features
 
+- ✅ **Official OpenTelemetry SDK** - Uses the official PHP SDK for full compliance
+- ✅ **Batch Processing** - Efficient span batching with configurable parameters
 - ✅ **No PHP Extension Required** - Works with stock PHP 7.4
-- ✅ **Automatic Database Tracing** - All Laravel DB queries are traced
+- ✅ **Automatic Database Tracing** - All Laravel DB queries are traced with SQL parsing
 - ✅ **HTTP Client Tracing** - Guzzle and cURL requests are traced
 - ✅ **Custom Spans** - Easy API for custom business logic tracing
 - ✅ **Distributed Tracing** - W3C traceparent header support
 - ✅ **Error Handling** - Tracing failures don't affect your app
-- ✅ **Synchronous Export** - Immediate span export to OTLP endpoint
+- ✅ **Comprehensive Attributes** - Rich span attributes following OpenTelemetry conventions
+- ✅ **Automatic Shutdown** - Proper cleanup of resources on application shutdown
+
+## Architecture
+
+The implementation uses the official OpenTelemetry PHP SDK with the following components:
+
+- **OTLP Exporter**: Sends traces to your OpenTelemetry backend
+- **Batch Span Processor**: Efficiently batches spans for better performance
+- **Tracer Provider**: Manages tracer instances and span processors
+- **Middleware**: Creates root spans for HTTP requests
+- **Service Provider**: Automatically traces database operations
+
+### Required Packages
+
+The following packages are required:
+
+- **`open-telemetry/exporter-otlp:0.0.17`**: OTLP exporter for sending traces to OpenTelemetry backends
+- **`php-http/guzzle6-adapter:^2.0`**: HTTP adapter for Guzzle 6 compatibility
+- **`nyholm/psr7:^1.8`**: PSR-7 HTTP message implementation
+
+### Batch Processing Configuration
+
+The batch processor is configured with these defaults:
+- **Max Queue Size**: 2048 spans
+- **Scheduled Delay**: 5000ms (5 seconds)
+- **Export Timeout**: 30000ms (30 seconds)
+- **Max Export Batch Size**: 512 spans
+- **Auto Flush**: Enabled
 
 ## Support
 
@@ -208,10 +267,12 @@ For issues or questions:
 2. Verify all files are in the correct locations
 3. Ensure environment variables are properly set
 4. Check Laravel logs for any errors
+5. Verify OpenTelemetry SDK installation
 
 ## Notes
 
-- All spans are exported synchronously to the OTLP endpoint
+- Spans are exported in batches for better performance
 - Tracing failures are silently handled and won't break your application
 - The implementation follows OpenTelemetry semantic conventions
-- Works with any OpenTelemetry-compatible backend (Last9, Jaeger, etc.) 
+- Works with any OpenTelemetry-compatible backend (Last9, Jaeger, etc.)
+- Automatic resource cleanup on application shutdown 
