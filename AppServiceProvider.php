@@ -37,7 +37,20 @@ class AppServiceProvider extends ServiceProvider
                 // Extract table name from SQL query
                 $tableName = null;
                 $sql = strtolower(trim($query->sql));
-                
+                if (!empty($query->bindings)) {
+                    foreach ($query->bindings as $binding) {
+                        if ($binding instanceof \DateTimeInterface) {
+                            $binding = $binding->format('Y-m-d H:i:s');
+                        } elseif (is_bool($binding)) {
+                            $binding = $binding ? '1' : '0';
+                        } elseif (is_null($binding)) {
+                            $binding = 'NULL';
+                        } elseif (!is_numeric($binding)) {
+                            $binding = (string)$binding;
+                        }
+                        $sql = preg_replace('/\?/', "'" . addslashes($binding) . "'", $sql, 1);
+                    }
+                }
                 // Match common SQL patterns to extract table name
                 if (preg_match('/(?:from|into|update|join)\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query->sql, $matches)) {
                     $tableName = $matches[1];
