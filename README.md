@@ -1,37 +1,28 @@
-# OpenTelemetry Manual Instrumentation for Laravel PHP 7.4
+# Complete OpenTelemetry Setup Guide for Your Laravel App
 
-This directory contains all files needed to add OpenTelemetry tracing to a legacy Laravel PHP 7.4 application **without requiring any PHP extension**.
+## 📁 Files to Copy
 
-## Quick Start
+Copy these 3 essential files from this project to your Laravel app:
 
-### 1. Copy Files (One Command)
-```bash
-# Copy all required files to your Laravel project
-cp otel.php /path/to/your/laravel/bootstrap/otel.php
-cp OpenTelemetryMiddleware.php /path/to/your/laravel/app/Http/Middleware/OpenTelemetryMiddleware.php
-cp AppServiceProvider.php /path/to/your/laravel/app/Providers/AppServiceProvider.php
+```
+bootstrap/otel.php                           # Core OpenTelemetry SDK setup
+app/Http/Middleware/OpenTelemetryMiddleware.php  # HTTP request/response tracing  
+app/Providers/AppServiceProvider.php            # Database tracing (copy the boot() method)
 ```
 
-### 2. Install Dependencies
-```bash
-# Add OpenTelemetry packages and HTTP client dependencies to your project
-composer require \
-    open-telemetry/exporter-otlp:0.0.17 \
-    php-http/guzzle6-adapter:^2.0 \
-    nyholm/psr7:^1.8
+## 🔧 Integration Steps
+
+### 1. **Update `public/index.php`**
+Add this line after the autoloader, before Laravel bootstrap:
+
+```php
+// Initialize OpenTelemetry SDK
+require_once __DIR__.'/../bootstrap/otel.php';
 ```
 
-### 3. Configure Environment
-```bash
-# Add these to your .env file
-echo "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-last9-endpoint/v1/traces" >> .env
-echo "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic your-token" >> .env
-echo "OTEL_SERVICE_NAME=your-app-name" >> .env
-echo "OTEL_SERVICE_VERSION=1.0.0" >> .env
-```
+### 2. **Register HTTP Middleware**
+In `app/Http/Kernel.php`, add to the `$middleware` array:
 
-### 4. Register Middleware
-Add this line to your `app/Http/Kernel.php` in the `$middleware` array:
 ```php
 protected $middleware = [
     // ... existing middleware
@@ -39,240 +30,153 @@ protected $middleware = [
 ];
 ```
 
-### 5. Initialize OpenTelemetry
-Add this line to your `public/index.php` **before** the autoloader:
+### 3. **Add Database Tracing**
+In your existing `AppServiceProvider.php` `boot()` method, add this code:
+
 ```php
-require_once __DIR__.'/../bootstrap/otel.php';
-require __DIR__.'/../vendor/autoload.php';
+public function boot()
+{
+    $tracer = $GLOBALS['otel_tracer'] ?? null;
+    
+    \Illuminate\Support\Facades\DB::listen(function ($query) use ($tracer) {
+        if (!$tracer) {
+            return;
+        }
+        
+        try {
+            $connectionName = $query->connectionName ?? config('database.default');
+            $connection = config("database.connections.{$connectionName}");
+            
+            $span = $tracer->spanBuilder('db.query')
+                ->setSpanKind(\OpenTelemetry\API\Trace\SpanKind::KIND_CLIENT)
+                ->setAttribute(\OpenTelemetry\SemConv\TraceAttributes::DB_SYSTEM, $connection['driver'] ?? 'unknown')
+                ->setAttribute(\OpenTelemetry\SemConv\TraceAttributes::DB_NAME, $connection['database'] ?? $connectionName)
+                ->setAttribute('server.address', $connection['host'] ?? 'localhost')
+                ->setAttribute('server.port', $connection['port'] ?? 3306)
+                ->setAttribute('db.statement', $query->sql)
+                ->setAttribute('db.query.duration_ms', $query->time)
+                ->startSpan();
+            
+            $span->setStatus(\OpenTelemetry\API\Trace\StatusCode::STATUS_OK);
+            $span->end();
+            
+        } catch (\Throwable $e) {
+            // Silently fail
+        }
+    });
+}
 ```
 
-### 6. Test the Setup
-```bash
-# Make a test request to verify tracing is working
-curl http://your-laravel-app.test/api/test
-```
-
-## Detailed Integration Steps
-
-### File Locations and Purpose
-
-| File | Destination | Purpose |
-|------|-------------|---------|
-| `otel.php` | `bootstrap/otel.php` | Core tracing logic with official OpenTelemetry SDK |
-| `OpenTelemetryMiddleware.php` | `app/Http/Middleware/` | Request root span creation with comprehensive attributes |
-| `AppServiceProvider.php` | `app/Providers/` | Automatic database query tracing with SQL parsing |
-
-### Environment Configuration
-
-Create or update your `.env` file with these variables:
+### 4. **Environment Variables**
+Add to your `.env` file:
 
 ```env
-# OpenTelemetry Configuration
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-last9-endpoint/v1/traces
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic your-token
 OTEL_SERVICE_NAME=your-app-name
 OTEL_SERVICE_VERSION=1.0.0
-
-# Optional: Override defaults
-APP_ENV=production
-DB_DATABASE=your_database
-DB_HOST=your_db_host
-DB_PORT=3306
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-collector-endpoint/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic your-auth-token"
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 ```
 
-### Code Integration
+### 5. **Composer Dependencies**
+Add to your `composer.json` and run `composer install`:
 
-#### 1. Middleware Registration
-In `app/Http/Kernel.php`:
-```php
-protected $middleware = [
-    // ... existing middleware
-    \App\Http\Middleware\OpenTelemetryMiddleware::class,
-];
+```json
+{
+    "require": {
+        "open-telemetry/sdk": "^1.0",
+        "open-telemetry/contrib-otlp": "^1.0",
+        "open-telemetry/sem-conv": "^1.0"
+    }
+}
 ```
 
-#### 2. Bootstrap Loading
-In `public/index.php` (before autoloader):
-```php
-require_once __DIR__.'/../bootstrap/otel.php';
-require __DIR__.'/../vendor/autoload.php';
-```
+## 🎯 What You'll Get
 
-#### 3. Database Tracing (Automatic)
-The `AppServiceProvider.php` file includes automatic database query tracing with SQL parsing and operation detection. No additional code needed!
+- ✅ **HTTP Request Spans** - All incoming requests traced automatically
+- ✅ **Database Spans** - All Eloquent ORM and raw DB queries traced  
+- ✅ **External HTTP Call Tracing** - Use helper functions `traced_curl_exec()` and `traced_guzzle_request()`
+- ✅ **Proper Span Relationships** - Database spans are children of HTTP request spans
+- ✅ **Performance Optimized** - Zero regex parsing, minimal overhead
 
-## Usage Examples
+## 🚀 Optional: External HTTP Calls
 
-### Custom Tracing in Your Code
+For tracing external HTTP calls, use these helper functions (included in `bootstrap/otel.php`):
 
 ```php
-// Create a custom span using the official SDK
-$GLOBALS['official_tracer']->spanBuilder('business.logic')
-    ->setAttribute('operation', 'user_registration')
-    ->setAttribute('user_id', $userId)
-    ->startSpan()
-    ->end();
-
-// Or use the simplified SimpleTracer wrapper
-$GLOBALS['simple_tracer']->createTrace('business.logic', [
-    'operation' => 'user_registration',
-    'user_id' => $userId
-]);
-
-// Trace database queries manually
-$GLOBALS['simple_tracer']->traceDatabase(
-    'SELECT * FROM users WHERE id = ?',
-    'mydb',
-    'default',
-    10.5, // duration in milliseconds
-    1     // row count
-);
-
-// Trace HTTP requests with Guzzle
-$client = new \GuzzleHttp\Client();
-$response = traced_guzzle_request($client, 'GET', 'https://api.example.com');
-
-// Trace HTTP requests with cURL
-$ch = curl_init('https://api.example.com');
+// Instead of curl_exec($ch)
 $result = traced_curl_exec($ch);
-curl_close($ch);
+
+// Instead of $client->request($method, $url, $options)  
+$response = traced_guzzle_request($client, $method, $url, $options);
 ```
 
-### PDO Tracing
+## 🔍 Testing Your Setup
+
+After integration, test that tracing is working:
+
+### Quick Test Endpoints
+You can add these test routes to verify everything is working:
 
 ```php
-// Trace PDO queries
-$pdo = new PDO('mysql:host=localhost;dbname=test', 'user', 'pass');
-$result = traced_pdo_query($pdo, 'SELECT * FROM users');
-
-// Trace PDO prepared statements
-$stmt = traced_pdo_prepare($pdo, 'SELECT * FROM users WHERE id = ?');
+// Test basic functionality
+Route::get('/test-otel', function () {
+    // This will create HTTP span automatically via middleware
+    
+    // Test database span
+    $users = \Illuminate\Support\Facades\DB::select('SELECT COUNT(*) as count FROM users');
+    
+    // Test external HTTP call (if needed)
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://httpbin.org/get');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $result = traced_curl_exec($ch);
+    curl_close($ch);
+    
+    return response()->json([
+        'message' => 'OpenTelemetry test completed',
+        'user_count' => $users[0]->count ?? 0,
+        'external_call' => 'success'
+    ]);
+});
 ```
 
-### Advanced Examples
+### Verification Checklist
+- [ ] HTTP request span appears in your tracing backend
+- [ ] Database query spans appear as children of HTTP span
+- [ ] External HTTP call spans appear (if using helper functions)
+- [ ] All spans contain proper semantic attributes
+- [ ] No application errors or performance degradation
 
-Check the `examples/` directory for comprehensive usage examples including:
-- Route-based tracing examples
-- Database operation tracing
-- PDO integration examples
-- Custom span creation patterns
-
-## Verification Commands
-
-### Check if Files are in Place
-```bash
-# Verify all files are copied correctly
-ls -la bootstrap/otel.php
-ls -la app/Http/Middleware/OpenTelemetryMiddleware.php
-ls -la app/Providers/AppServiceProvider.php
-```
-
-### Test Environment Variables
-```bash
-# Check if environment variables are loaded
-php -r "echo 'OTEL_ENDPOINT: ' . ($_ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ?? 'NOT SET') . PHP_EOL;"
-```
-
-### Test Tracing
-```bash
-# Make a test request and check logs
-curl -v http://your-app.test/api/test 2>&1 | grep -i trace
-```
-
-## Troubleshooting
+## 🐛 Troubleshooting
 
 ### Common Issues
 
-1. **"Class not found" errors**
-   ```bash
-   # Clear Laravel caches
-   php artisan config:clear
-   php artisan cache:clear
-   php artisan route:clear
-   ```
+1. **No spans appearing**
+   - Check environment variables are set correctly
+   - Verify collector endpoint is reachable
+   - Check Laravel logs for any errors
 
-2. **Tracing not appearing in Last9**
-   - Check your endpoint URL and authentication token
-   - Verify network connectivity to Last9
-   - Check Laravel logs for errors
-   - Ensure the OpenTelemetry SDK is properly installed
+2. **Database spans missing**
+   - Ensure `AppServiceProvider.php` boot method includes the DB::listen code
+   - Verify database queries are actually executing
 
-3. **Database queries not traced**
-   - Ensure `AppServiceProvider.php` is properly copied
-   - Check if database connection is working
-   - Verify the `boot()` method contains the DB::listen code
+3. **HTTP spans missing**
+   - Confirm middleware is registered in `Kernel.php`
+   - Check middleware order (should be early in the stack)
 
-4. **Batch processing issues**
-   - Check if spans are being exported (may be delayed due to batch processing)
-   - Verify the batch processor configuration in `otel.php`
+4. **Performance issues**
+   - This implementation is optimized for minimal overhead
+   - Monitor your application performance before/after
+   - Adjust batch processor settings in `bootstrap/otel.php` if needed
 
-5. **Package installation issues**
-   - Ensure all required packages are installed with correct versions
-   - Run `composer install` to install missing dependencies
-   - Check for version compatibility between packages
-   - Verify the specific version `0.0.17` of `open-telemetry/exporter-otlp` is installed
+## 📚 Additional Resources
 
-### Debug Mode
+- [OpenTelemetry PHP Documentation](https://opentelemetry.io/docs/php/)
+- [OpenTelemetry Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/)
+- [Laravel Service Providers](https://laravel.com/docs/providers)
+- [Laravel Middleware](https://laravel.com/docs/middleware)
 
-To enable debug logging, add this to your `.env`:
-```env
-APP_DEBUG=true
-LOG_LEVEL=debug
-```
+---
 
-## Features
-
-- ✅ **Official OpenTelemetry SDK** - Uses the official PHP SDK for full compliance
-- ✅ **Batch Processing** - Efficient span batching with configurable parameters
-- ✅ **No PHP Extension Required** - Works with stock PHP 7.4
-- ✅ **Automatic Database Tracing** - All Laravel DB queries are traced with SQL parsing
-- ✅ **HTTP Client Tracing** - Guzzle and cURL requests are traced
-- ✅ **Custom Spans** - Easy API for custom business logic tracing
-- ✅ **Distributed Tracing** - W3C traceparent header support
-- ✅ **Error Handling** - Tracing failures don't affect your app
-- ✅ **Comprehensive Attributes** - Rich span attributes following OpenTelemetry conventions
-- ✅ **Automatic Shutdown** - Proper cleanup of resources on application shutdown
-
-## Architecture
-
-The implementation uses the official OpenTelemetry PHP SDK with the following components:
-
-- **OTLP Exporter**: Sends traces to your OpenTelemetry backend
-- **Batch Span Processor**: Efficiently batches spans for better performance
-- **Tracer Provider**: Manages tracer instances and span processors
-- **Middleware**: Creates root spans for HTTP requests
-- **Service Provider**: Automatically traces database operations
-
-### Required Packages
-
-The following packages are required:
-
-- **`open-telemetry/exporter-otlp:0.0.17`**: OTLP exporter for sending traces to OpenTelemetry backends
-- **`php-http/guzzle6-adapter:^2.0`**: HTTP adapter for Guzzle 6 compatibility
-- **`nyholm/psr7:^1.8`**: PSR-7 HTTP message implementation
-
-### Batch Processing Configuration
-
-The batch processor is configured with these defaults:
-- **Max Queue Size**: 2048 spans
-- **Scheduled Delay**: 5000ms (5 seconds)
-- **Export Timeout**: 30000ms (30 seconds)
-- **Max Export Batch Size**: 512 spans
-- **Auto Flush**: Enabled
-
-## Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Verify all files are in the correct locations
-3. Ensure environment variables are properly set
-4. Check Laravel logs for any errors
-5. Verify OpenTelemetry SDK installation
-
-## Notes
-
-- Spans are exported in batches for better performance
-- Tracing failures are silently handled and won't break your application
-- The implementation follows OpenTelemetry semantic conventions
-- Works with any OpenTelemetry-compatible backend (Last9, Jaeger, etc.)
-- Automatic resource cleanup on application shutdown 
+That's it! Your Laravel app will now have comprehensive OpenTelemetry tracing with HTTP, database, and external call monitoring.
