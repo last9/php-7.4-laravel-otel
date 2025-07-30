@@ -51,6 +51,7 @@ class AppServiceProvider extends ServiceProvider
                         $sql = preg_replace('/\?/', "'" . addslashes($binding) . "'", $sql, 1);
                     }
                 }
+                
                 // Match common SQL patterns to extract table name
                 if (preg_match('/(?:from|into|update|join)\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?/i', $query->sql, $matches)) {
                     $tableName = $matches[1];
@@ -66,6 +67,12 @@ class AppServiceProvider extends ServiceProvider
                     ->setAttribute('server.port', $connection['port'] ?? 3306)
                     ->setAttribute('db.statement', $query->sql)
                     ->setAttribute('db.query.duration_ms', $query->time);
+                
+                // Add SQL parameter bindings if they exist
+                if (!empty($query->bindings)) {
+                    $spanBuilder->setAttribute('db.statement.parameters', json_encode($query->bindings));
+                    $spanBuilder->setAttribute('db.statement.parameters.count', count($query->bindings));
+                }
                 
                 // Add table name if extracted
                 if ($tableName) {
